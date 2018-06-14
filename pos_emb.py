@@ -4,7 +4,8 @@ import torch
 class PositionalEmbedding(torch.nn.Module):
 
     def __init__(self, dim, num_entities, window_size,
-                 prior_emb=None, cuda=True, prior_model=None):
+                 prior_emb=None, cuda=True, prior_model=None,
+                 regularization_type=None, regularization_weight=0):
 
         super(PositionalEmbedding, self).__init__()
         self.dim = dim
@@ -15,6 +16,8 @@ class PositionalEmbedding(torch.nn.Module):
         self.model = torch.nn.Linear(1, num_entities)
         self.prior_model = prior_model
         self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.regularization_type = regularization_type
+        self.regularization_weight = regularization_weight
 
         if cuda:
             self.cuda = True
@@ -43,13 +46,25 @@ class PositionalEmbedding(torch.nn.Module):
         return ([x for x in self.emb.parameters()] +
                 [x for x in self.model.parameters()])
 
+    def get_regularization_term(self):
+
+        if self.regularization_type == 'L1':
+            return self.emb.weight.abs().sum()
+        if self.regularization_type == 'L2':
+            return self.emb.weight.pow(2).sum()
+        if self.regularization_type == 'prev_abs':
+            if self.dim == 1:
+                return 0
+            return (
+                # current abs val > 0.1
+                (self.emb.weight.abs() - 0.1).sign().clamp(min=0) *
+                # prior abs val < 0.1
+                (1-(self.prior_emb.weight.abs() - 0.1).sign().clamp(min=0))
+            ).sum()
+        return 0
+
     def forward(self, batch):
-        focal_ids = batch[:, [self.window_size]]
-        features_ids = batch[
-            :,
-            [x for x in range(0, 2 * self.window_size + 1)
-             if x != self.window_size]
-        ]
+        focal_ids, features_ids = batch
 
         if self.cuda:
             focal_ids = focal_ids.cuda()
@@ -63,6 +78,9 @@ class PositionalEmbedding(torch.nn.Module):
             step_out = self.prior_model(step_out)
             out = step_out + out
         loss = self.loss_fn(input=out, target=focal_ids.squeeze())
+
+        loss += self.regularization_weight * self.get_regularization_term()
+
         return(loss)
 
     def get_prior_emb(self):
